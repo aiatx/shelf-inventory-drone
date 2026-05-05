@@ -26,19 +26,30 @@ mission:
   kp_yaw: 0.60
 
   # 速度限幅
+  # max_* 仍用于 scan 扫码点附近，保持原来的靠近二维码稳定性。
   max_vel_xy: 0.25
   max_vel_z: 0.18
-  # 起飞专用竖直速度，只比原来略快，避免起飞太慢但不影响后续扫码高度稳定性
-  takeoff_max_vel_z: 0.22
-  takeoff_max_acc_z: 0.16
   max_yaw_rate: 0.40
+
+  # 普通路段专用速度：只用于 safe 过渡点和 RETURN_LAND 返回降落点上方。
+  # scan 扫码点最后接近段不会使用这些参数。
+  route_max_vel_xy: 0.32
+  route_max_vel_z: 0.22
+  route_max_yaw_rate: 0.50
+  route_max_acc_xy: 0.24
+  route_max_acc_z: 0.16
+  route_max_acc_yaw: 0.45
+
+  # 起飞专用竖直速度，只比原来略快，避免起飞太慢但不影响后续扫码高度稳定性
+  takeoff_max_vel_z: 0.25
+  takeoff_max_acc_z: 0.18
 
   # 激光点在图像中的像素坐标；848x480 图像中心约为 424,240
   laser_u: 424
   laser_v: 240
 
-  # 二维码中心与激光点的允许像素误差
-  align_pixel_eps: 25
+  # 二维码中心与激光点的允许像素误差；为缩短对齐耗时，适当放宽到 40px
+  align_pixel_eps: 35
 
   # 视觉对准参数
   align_kp_u: 0.0008
@@ -46,18 +57,31 @@ mission:
   max_align_vel_y: 0.10
   max_align_vel_z: 0.08
 
-  # 超时与激光点亮时间
-  search_timeout: 3.0
-  align_timeout: 4.0
-  laser_flash_time: 0.5
-  ack_timeout: 0.4
+  # 超时与激光点亮时间；为压缩总用时，搜索/对齐/点亮时间适当缩短
+  search_timeout: 1.4
+  align_timeout: 2.0
+  laser_flash_time: 0.3
+  ack_timeout: 0.1
 
-  # HOVER_BEFORE_SCAN：扫码前最短悬停 0.5s，最长等待 2.0s
-  scan_pre_hover_time: 0.5
-  scan_pre_hover_timeout: 2.0
+  # HOVER_BEFORE_SCAN：扫码前最短悬停 0.3s，最长等待 1.0s
+  scan_pre_hover_time: 0.3
+  scan_pre_hover_timeout: 1.0
+
+
+  # 受控降落参数：先回到 land 点上方，再用递减 z 航点下降，近地后才交给 AUTO.LAND 停桨。
+  # 原默认 0.06m/s 会非常慢；这里改为约 0.18m/s，并把下降级距放大到 0.25m。
+  controlled_land_step: 0.25
+  controlled_land_final_height: 0.05
+  controlled_land_contact_height: 0.12
+  controlled_land_max_vel_z: 0.18
+  controlled_land_max_acc_z: 0.20
+  controlled_land_pos_eps: 0.10
+  controlled_land_z_eps: 0.06
+  controlled_land_yaw_eps_deg: 8.0
+  land_finish_timeout: 25.0
 
   # 降落点：题图右上角黑色圆形区域中心。
-  # D 面最后一个盘点点为 z=1.40，因此这里也保持 z=1.40，扫完 D 面后直接平移到降落点正上方，再由 AUTO.LAND 降落。
+  # D 面最后一个盘点点为 z=1.40，因此这里也保持 z=1.40，扫完 D 面后先平移到降落点正上方，再执行受控递减高度降落。
   land:
     x: 3.50
     y: 2.50

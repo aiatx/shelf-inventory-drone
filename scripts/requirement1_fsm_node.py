@@ -103,6 +103,16 @@ class Requirement1FSM:
         self.max_vel_z = float(self.mission.get("max_vel_z", 0.15))         # 最大竖直速度
         self.max_yaw_rate = float(self.mission.get("max_yaw_rate", 0.40))   # 最大偏航角速度
 
+        # ====================【优化 2026-05-05】任务1普通路段单独提速 ====================
+        # 说明：
+        #   max_vel_xy / max_vel_z / max_yaw_rate 仍保留给 scan 扫码点接近段使用，
+        #   避免最后靠近二维码时速度变快，影响悬停和识别质量。
+        #   route_* 只在 safe 过渡点和 RETURN_LAND 返回降落点时使用，用于缩短路上移动时间。
+        self.route_max_vel_xy = float(self.mission.get("route_max_vel_xy", self.max_vel_xy))
+        self.route_max_vel_z = float(self.mission.get("route_max_vel_z", self.max_vel_z))
+        self.route_max_yaw_rate = float(self.mission.get("route_max_yaw_rate", self.max_yaw_rate))
+        # ==========================================================================
+
         # ====================【实飞稳定修改 2026-05-03】速度规划与限加速度参数 ====================
         # 说明：
         #   原来的 goto_target() 是简单 P 控制，误差一大速度立刻打满，到点后又立刻切零，
@@ -115,6 +125,15 @@ class Requirement1FSM:
         self.max_acc_xy = float(self.mission.get("max_acc_xy", 0.18))       # 水平方向最大速度变化率，单位 m/s^2
         self.max_acc_z = float(self.mission.get("max_acc_z", 0.12))         # 竖直方向最大速度变化率，单位 m/s^2
         self.max_acc_yaw = float(self.mission.get("max_acc_yaw", 0.35))     # 偏航角速度最大变化率，单位 rad/s^2
+
+        # ====================【优化 2026-05-05】任务1普通路段单独限加速度 ====================
+        # 说明：
+        #   route_max_acc_* 只配合 route_max_vel_* 用在 safe 过渡点和 RETURN_LAND。
+        #   scan 扫码点、HOVER_BEFORE_SCAN、SEARCH_QR、ALIGN_QR、LAND 仍使用原来的稳定参数。
+        self.route_max_acc_xy = float(self.mission.get("route_max_acc_xy", self.max_acc_xy))
+        self.route_max_acc_z = float(self.mission.get("route_max_acc_z", self.max_acc_z))
+        self.route_max_acc_yaw = float(self.mission.get("route_max_acc_yaw", self.max_acc_yaw))
+        # ==========================================================================
 
         # ====================【微调 2026-05-04】起飞专用竖直速度 ====================
         # 起飞阶段可以略快一点，但不影响后续扫二维码时的高度控制参数。
@@ -236,30 +255,30 @@ class Requirement1FSM:
         #   3. 检测到接地/近地后，才发布 /uav/land=True，让 mavros bridge 切 AUTO.LAND 完成停桨/上锁。
         # 这样避免刚到降落点就切 AUTO.LAND 导致机身大角度扭转、落点漂移。
         self.controlled_land_step = float(
-            self.mission.get("controlled_land_step", 0.10)
+            self.mission.get("controlled_land_step", 0.25)
         ) # 每级下降高度，单位 m
 
         self.controlled_land_final_height = float(
-            self.mission.get("controlled_land_final_height", 0.04)
+            self.mission.get("controlled_land_final_height", 0.05)
         ) # 最后一级目标：起飞地面高度 + 该值
 
         self.controlled_land_contact_height = float(
-            self.mission.get("controlled_land_contact_height", 0.08)
+            self.mission.get("controlled_land_contact_height", 0.12)
         ) # 判定接地/近地高度阈值
 
         self.controlled_land_max_vel_z = float(
-            self.mission.get("controlled_land_max_vel_z", 0.06)
-        ) # 受控下降最大竖直速度，建议 0.04~0.08
+            self.mission.get("controlled_land_max_vel_z", 0.18)
+        ) # 受控下降最大竖直速度，建议 0.14~0.20，过快则下调
 
         self.controlled_land_max_acc_z = float(
-            self.mission.get("controlled_land_max_acc_z", 0.08)
+            self.mission.get("controlled_land_max_acc_z", 0.20)
         ) # 受控下降最大竖直加速度
 
         self.controlled_land_pos_eps = float(
-            self.mission.get("controlled_land_pos_eps", 0.08)
+            self.mission.get("controlled_land_pos_eps", 0.10)
         )
         self.controlled_land_z_eps = float(
-            self.mission.get("controlled_land_z_eps", 0.04)
+            self.mission.get("controlled_land_z_eps", 0.06)
         )
         self.controlled_land_yaw_eps = math.radians(
             float(self.mission.get("controlled_land_yaw_eps_deg", 8.0))
@@ -762,8 +781,13 @@ class Requirement1FSM:
 
         return target_value
 
-    def publish_smooth_cmd(self, target_cmd):
-        """发布经过限加速度处理后的速度指令。"""
+    def publish_smooth_cmd(self, target_cmd, max_acc_xy=None, max_acc_z=None, max_acc_yaw=None):
+        """发布经过限加速度处理后的速度指令。
+
+        max_acc_xy / max_acc_z / max_acc_yaw 为可选参数。
+        不传时使用原来的全局稳定参数；普通 safe 路段和 RETURN_LAND 可传入 route_* 参数加快，
+        但扫码点附近仍不传参，从而保持原来的稳定速度规划。
+        """
 
         now = rospy.Time.now()
         dt = (now - self.last_control_time).to_sec()
@@ -773,9 +797,16 @@ class Requirement1FSM:
 
         self.last_control_time = now
 
-        max_dxy = self.max_acc_xy * dt       # 本周期水平速度最多允许变化量
-        max_dz = self.max_acc_z * dt         # 本周期竖直速度最多允许变化量
-        max_dyaw = self.max_acc_yaw * dt     # 本周期偏航角速度最多允许变化量
+        if max_acc_xy is None:
+            max_acc_xy = self.max_acc_xy
+        if max_acc_z is None:
+            max_acc_z = self.max_acc_z
+        if max_acc_yaw is None:
+            max_acc_yaw = self.max_acc_yaw
+
+        max_dxy = max_acc_xy * dt       # 本周期水平速度最多允许变化量
+        max_dz = max_acc_z * dt         # 本周期竖直速度最多允许变化量
+        max_dyaw = max_acc_yaw * dt     # 本周期偏航角速度最多允许变化量
 
         self.smooth_cmd.linear.x = self.limit_step(
             target_cmd.linear.x,
@@ -919,13 +950,26 @@ class Requirement1FSM:
         """生成降落点上方目标点。"""
         return self.resolve_point(self.land_point)
 
-    def goto_target(self, target, max_vel_z=None, max_acc_z=None):
+    def goto_target(
+        self,
+        target,
+        max_vel_xy=None,
+        max_acc_xy=None,
+        max_vel_z=None,
+        max_acc_z=None,
+        max_yaw_rate=None,
+        max_acc_yaw=None
+    ):
         """使用“距离限速 + 限加速度”的方式飞向目标点。
 
         与旧 P 控制的区别：
             旧逻辑直接 cmd = kp * error，误差大时速度突然打满；
             新逻辑先根据剩余距离规划目标速度，再用 publish_smooth_cmd() 限制速度变化率，
             因此起步、刹车、切航点都会更平滑。
+
+        参数说明：
+            不传 max_vel_xy/max_acc_xy/max_yaw_rate/max_acc_yaw 时，仍使用原来的扫码稳定参数；
+            safe 过渡点和 RETURN_LAND 会传入 route_* 参数，用于缩短路上移动时间。
         """
 
         ex = target["x"] - self.x
@@ -937,16 +981,25 @@ class Requirement1FSM:
 
         cmd = Twist()
 
-        # 起飞阶段可传入略大的竖直速度/加速度；其他阶段默认使用全局稳定参数。
+        # 默认使用全局稳定参数；safe 过渡点、RETURN_LAND、起飞阶段可传入自己的速度/加速度上限。
+        # 这样可以做到“路上加快，扫码点附近不加快”。
+        if max_vel_xy is None:
+            max_vel_xy = self.max_vel_xy
+        if max_acc_xy is None:
+            max_acc_xy = self.max_acc_xy
         if max_vel_z is None:
             max_vel_z = self.max_vel_z
         if max_acc_z is None:
             max_acc_z = self.max_acc_z
+        if max_yaw_rate is None:
+            max_yaw_rate = self.max_yaw_rate
+        if max_acc_yaw is None:
+            max_acc_yaw = self.max_acc_yaw
 
         yaw_speed = self.distance_limited_speed(
             abs(eyaw),
-            self.max_yaw_rate,
-            self.max_acc_yaw,
+            max_yaw_rate,
+            max_acc_yaw,
             math.radians(8.0)
         )
         cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
@@ -960,14 +1013,19 @@ class Requirement1FSM:
                 self.min_slow_distance_z
             )
             cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
-            self.publish_smooth_cmd(cmd)
+            self.publish_smooth_cmd(
+                cmd,
+                max_acc_xy=max_acc_xy,
+                max_acc_z=max_acc_z,
+                max_acc_yaw=max_acc_yaw
+            )
             return
 
         if horizontal_error > 1e-4:  # 有水平误差时，沿误差方向生成速度向量
             xy_speed = self.distance_limited_speed(
                 horizontal_error,
-                self.max_vel_xy,
-                self.max_acc_xy,
+                max_vel_xy,
+                max_acc_xy,
                 self.min_slow_distance_xy
             )
             cmd.linear.x = xy_speed * ex / horizontal_error
@@ -981,7 +1039,12 @@ class Requirement1FSM:
         )
         cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
 
-        self.publish_smooth_cmd(cmd)
+        self.publish_smooth_cmd(
+            cmd,
+            max_acc_xy=max_acc_xy,
+            max_acc_z=max_acc_z,
+            max_acc_yaw=max_acc_yaw
+        )
 
     def arrived_target(self, target, pos_eps=None, z_eps=None, yaw_eps=None):
         """判断是否到达目标点。
@@ -1388,7 +1451,20 @@ class Requirement1FSM:
             hold_target=is_scan_point
         ):  # 未到达或刚到点未稳定够 arrive_hold_time
             if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后由 reached_and_hold 继续锁点/刹车等待
-                self.goto_target(target)
+                if is_scan_point:
+                    # scan 点最后靠近二维码时仍使用原来的 max_vel_* / max_acc_* 稳定参数。
+                    self.goto_target(target)
+                else:
+                    # safe 过渡点使用 route_* 快速参数，只缩短路上移动时间。
+                    self.goto_target(
+                        target,
+                        max_vel_xy=self.route_max_vel_xy,
+                        max_acc_xy=self.route_max_acc_xy,
+                        max_vel_z=self.route_max_vel_z,
+                        max_acc_z=self.route_max_acc_z,
+                        max_yaw_rate=self.route_max_yaw_rate,
+                        max_acc_yaw=self.route_max_acc_yaw
+                    )
             return
 
         self.stop_motion()
@@ -1651,7 +1727,17 @@ class Requirement1FSM:
             return
 
         if self.arrive_hold_start is None:  # 还没到达阈值时才继续飞；到达后保持刹车等待
-            self.goto_target(target)
+            # 返回降落点上方属于普通路段，使用 route_* 参数缩短水平返回时间；
+            # 后续 LAND 里的递减高度受控下降仍使用 controlled_land_*，不会被这里加速。
+            self.goto_target(
+                target,
+                max_vel_xy=self.route_max_vel_xy,
+                max_acc_xy=self.route_max_acc_xy,
+                max_vel_z=self.route_max_vel_z,
+                max_acc_z=self.route_max_acc_z,
+                max_yaw_rate=self.route_max_yaw_rate,
+                max_acc_yaw=self.route_max_acc_yaw
+            )
 
     def state_land(self):
         """LAND：先按 YAML land 点生成递减 z 航点受控下降，接地/近地后再 AUTO.LAND 停桨。"""

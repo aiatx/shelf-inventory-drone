@@ -89,6 +89,19 @@ class Task2FSM:
         self.max_acc_z = float(self.routes.get("max_acc_z", 0.12))
         self.max_acc_yaw = float(self.routes.get("max_acc_yaw", 0.35))
 
+        # ====================【优化 2026-05-05】任务2普通路线段单独提速 ====================
+        # 说明：
+        #   max_vel_xy / max_vel_z / max_yaw_rate 仍保留给最终 GOTO_SCAN_POINT 使用，
+        #   避免 safe -> scan 的扫码接近段变快。
+        #   route_* 只在 GOTO_ROUTE_TO_FACE 和 RETURN_ROUTE 中使用，用于缩短路上移动时间。
+        self.route_max_vel_xy = float(self.routes.get("route_max_vel_xy", self.max_vel_xy))
+        self.route_max_vel_z = float(self.routes.get("route_max_vel_z", self.max_vel_z))
+        self.route_max_yaw_rate = float(self.routes.get("route_max_yaw_rate", self.max_yaw_rate))
+        self.route_max_acc_xy = float(self.routes.get("route_max_acc_xy", self.max_acc_xy))
+        self.route_max_acc_z = float(self.routes.get("route_max_acc_z", self.max_acc_z))
+        self.route_max_acc_yaw = float(self.routes.get("route_max_acc_yaw", self.max_acc_yaw))
+        # ==========================================================================
+
         # ====================【微调 2026-05-04】起飞专用竖直速度 ====================
         # 只让起飞阶段略快一点，不影响任务2后续靠近货架、扫码、返回时的高度控制。
         self.takeoff_max_vel_z = float(self.routes.get("takeoff_max_vel_z", self.max_vel_z))
@@ -162,13 +175,13 @@ class Task2FSM:
         # ====================【修改 2026-05-04】受控递减高度降落参数 ====================
         # 降落流程：先回到 YAML land 点作为开始降落点，再生成 z 递减航点，
         # 低速下降到接地/近地后，才发布 /uav/land=True 让 bridge AUTO.LAND 停桨上锁。
-        self.controlled_land_step = float(self.routes.get("controlled_land_step", 0.10))
-        self.controlled_land_final_height = float(self.routes.get("controlled_land_final_height", 0.04))
-        self.controlled_land_contact_height = float(self.routes.get("controlled_land_contact_height", 0.08))
-        self.controlled_land_max_vel_z = float(self.routes.get("controlled_land_max_vel_z", 0.06))
-        self.controlled_land_max_acc_z = float(self.routes.get("controlled_land_max_acc_z", 0.08))
-        self.controlled_land_pos_eps = float(self.routes.get("controlled_land_pos_eps", 0.08))
-        self.controlled_land_z_eps = float(self.routes.get("controlled_land_z_eps", 0.04))
+        self.controlled_land_step = float(self.routes.get("controlled_land_step", 0.25))
+        self.controlled_land_final_height = float(self.routes.get("controlled_land_final_height", 0.05))
+        self.controlled_land_contact_height = float(self.routes.get("controlled_land_contact_height", 0.12))
+        self.controlled_land_max_vel_z = float(self.routes.get("controlled_land_max_vel_z", 0.18))
+        self.controlled_land_max_acc_z = float(self.routes.get("controlled_land_max_acc_z", 0.20))
+        self.controlled_land_pos_eps = float(self.routes.get("controlled_land_pos_eps", 0.10))
+        self.controlled_land_z_eps = float(self.routes.get("controlled_land_z_eps", 0.06))
         self.controlled_land_yaw_eps = math.radians(
             float(self.routes.get("controlled_land_yaw_eps_deg", 8.0))
         )
@@ -370,16 +383,23 @@ class Task2FSM:
             return current_value - max_delta
         return target_value
 
-    def publish_smooth_cmd(self, target_cmd):
+    def publish_smooth_cmd(self, target_cmd, max_acc_xy=None, max_acc_z=None, max_acc_yaw=None):
         now = rospy.Time.now()
         dt = (now - self.last_control_time).to_sec()
         if dt <= 0.0 or dt > 0.20:
             dt = 1.0 / 30.0
         self.last_control_time = now
 
-        max_dxy = self.max_acc_xy * dt
-        max_dz = self.max_acc_z * dt
-        max_dyaw = self.max_acc_yaw * dt
+        if max_acc_xy is None:
+            max_acc_xy = self.max_acc_xy
+        if max_acc_z is None:
+            max_acc_z = self.max_acc_z
+        if max_acc_yaw is None:
+            max_acc_yaw = self.max_acc_yaw
+
+        max_dxy = max_acc_xy * dt
+        max_dz = max_acc_z * dt
+        max_dyaw = max_acc_yaw * dt
 
         self.smooth_cmd.linear.x = self.limit_step(target_cmd.linear.x, self.smooth_cmd.linear.x, max_dxy)
         self.smooth_cmd.linear.y = self.limit_step(target_cmd.linear.y, self.smooth_cmd.linear.y, max_dxy)
@@ -591,7 +611,16 @@ class Task2FSM:
     def make_takeoff_target(self):
         return {"x": self.home_x, "y": self.home_y, "z": self.home_z + self.takeoff_height, "yaw": self.home_yaw}
 
-    def goto_target(self, target, max_vel_z=None, max_acc_z=None):
+    def goto_target(
+        self,
+        target,
+        max_vel_xy=None,
+        max_acc_xy=None,
+        max_vel_z=None,
+        max_acc_z=None,
+        max_yaw_rate=None,
+        max_acc_yaw=None
+    ):
         ex = target["x"] - self.x
         ey = target["y"] - self.y
         ez = target["z"] - self.z
@@ -600,16 +629,25 @@ class Task2FSM:
 
         cmd = Twist()
 
-        # 起飞阶段可传入略大的竖直速度/加速度；其他阶段默认使用全局稳定参数。
+        # 默认使用全局稳定参数；普通路线段和起飞阶段可以只传入自己的速度/加速度上限。
+        # 这样可以做到“路上加快，扫码点附近不加快”。
+        if max_vel_xy is None:
+            max_vel_xy = self.max_vel_xy
+        if max_acc_xy is None:
+            max_acc_xy = self.max_acc_xy
         if max_vel_z is None:
             max_vel_z = self.max_vel_z
         if max_acc_z is None:
             max_acc_z = self.max_acc_z
+        if max_yaw_rate is None:
+            max_yaw_rate = self.max_yaw_rate
+        if max_acc_yaw is None:
+            max_acc_yaw = self.max_acc_yaw
 
         yaw_speed = self.distance_limited_speed(
             abs(eyaw),
-            self.max_yaw_rate,
-            self.max_acc_yaw,
+            max_yaw_rate,
+            max_acc_yaw,
             math.radians(8.0)
         )
         cmd.angular.z = math.copysign(yaw_speed, eyaw) if abs(eyaw) > 1e-4 else 0.0
@@ -617,14 +655,19 @@ class Task2FSM:
         if abs(eyaw) > self.yaw_first_threshold:
             z_speed = self.distance_limited_speed(abs(ez), max_vel_z, max_acc_z, self.min_slow_distance_z)
             cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
-            self.publish_smooth_cmd(cmd)
+            self.publish_smooth_cmd(
+                cmd,
+                max_acc_xy=max_acc_xy,
+                max_acc_z=max_acc_z,
+                max_acc_yaw=max_acc_yaw
+            )
             return
 
         if horizontal_error > 1e-4:
             xy_speed = self.distance_limited_speed(
                 horizontal_error,
-                self.max_vel_xy,
-                self.max_acc_xy,
+                max_vel_xy,
+                max_acc_xy,
                 self.min_slow_distance_xy
             )
             cmd.linear.x = xy_speed * ex / horizontal_error
@@ -633,7 +676,12 @@ class Task2FSM:
         z_speed = self.distance_limited_speed(abs(ez), max_vel_z, max_acc_z, self.min_slow_distance_z)
         cmd.linear.z = math.copysign(z_speed, ez) if abs(ez) > 1e-4 else 0.0
 
-        self.publish_smooth_cmd(cmd)
+        self.publish_smooth_cmd(
+            cmd,
+            max_acc_xy=max_acc_xy,
+            max_acc_z=max_acc_z,
+            max_acc_yaw=max_acc_yaw
+        )
 
     def arrived_target(self, target, pos_eps=None, z_eps=None, yaw_eps=None):
         if pos_eps is None:
@@ -1080,7 +1128,15 @@ class Task2FSM:
             return
 
         if self.arrive_hold_start is None:
-            self.goto_target(target)
+            self.goto_target(
+                target,
+                max_vel_xy=self.route_max_vel_xy,
+                max_acc_xy=self.route_max_acc_xy,
+                max_vel_z=self.route_max_vel_z,
+                max_acc_z=self.route_max_acc_z,
+                max_yaw_rate=self.route_max_yaw_rate,
+                max_acc_yaw=self.route_max_acc_yaw
+            )
 
     def state_goto_scan_point(self):
         if self.reached_and_hold(
@@ -1286,7 +1342,15 @@ class Task2FSM:
             return
 
         if self.arrive_hold_start is None:
-            self.goto_target(target)
+            self.goto_target(
+                target,
+                max_vel_xy=self.route_max_vel_xy,
+                max_acc_xy=self.route_max_acc_xy,
+                max_vel_z=self.route_max_vel_z,
+                max_acc_z=self.route_max_acc_z,
+                max_yaw_rate=self.route_max_yaw_rate,
+                max_acc_yaw=self.route_max_acc_yaw
+            )
 
     def state_land(self):
         """LAND：先按 YAML land 点生成递减 z 航点受控下降，接地/近地后再 AUTO.LAND 停桨。"""

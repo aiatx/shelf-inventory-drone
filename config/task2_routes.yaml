@@ -1,7 +1,7 @@
 # task2_routes.yaml
 # 第二问：定点巡查航线配置。
 # use_relative=true 时，x/y/z 是相对起飞区 home 点的 local 坐标偏移；yaw 直接使用 YAML 中的目标 yaw。
-# 任务2默认从起飞区重新起飞，最后到右上角降落区上方，再由 /uav/land 执行 AUTO.LAND。
+# 任务2默认从起飞区重新起飞，最后到右上角降落区上方，再执行受控递减高度降落，近地后由 /uav/land 停桨。
 
 task2_routes:
   use_relative: true
@@ -27,12 +27,25 @@ task2_routes:
   kp_xy: 0.40
   kp_z: 0.45
   kp_yaw: 0.55
+
+  # 全局速度仍保持原来的保守值，给最后进入扫码点 GOTO_SCAN_POINT 使用，
+  # 避免扫码点附近加速导致冲过头或悬停晃动。
   max_vel_xy: 0.18
   max_vel_z: 0.12
-  # 起飞专用竖直速度，只略微加快，不改变后续航点高度控制
-  takeoff_max_vel_z: 0.16
-  takeoff_max_acc_z: 0.15
   max_yaw_rate: 0.35
+
+  # 仅普通路线段使用的速度上限：GOTO_ROUTE_TO_FACE / RETURN_ROUTE。
+  # 不用于最终 safe -> scan 的扫码接近段。
+  route_max_vel_xy: 0.24
+  route_max_vel_z: 0.14
+  route_max_yaw_rate: 0.42
+  route_max_acc_xy: 0.22
+  route_max_acc_z: 0.14
+  route_max_acc_yaw: 0.42
+
+  # 起飞专用竖直速度，只略微加快，不改变后续航点高度控制。
+  takeoff_max_vel_z: 0.19
+  takeoff_max_acc_z: 0.18
 
   # 任务2会根据目标 A1~D6 动态生成一个“进扫码前 safe 点”。
   # 该 safe 点的 x/z/yaw 与目标扫码点一致，只把 y 放到 pre_scan_y，
@@ -40,23 +53,36 @@ task2_routes:
   pre_scan_y: -0.10
 
   # 视觉对齐参数；848x480 时图像中心约为 424,240
+  # 为缩短对齐耗时，align_pixel_eps 适当放宽到 40px
   laser_u: 424.0
   laser_v: 240.0
-  align_pixel_eps: 25.0
+  align_pixel_eps: 40.0
   align_kp_u: 0.0008
   align_kp_v: 0.0008
   max_align_vel_y: 0.08
   max_align_vel_z: 0.06
 
-  search_timeout: 3.0
-  align_timeout: 4.0
-  verify_timeout: 1.0
-  qr_fresh_timeout: 0.8
-  land_finish_timeout: 45.0
+  search_timeout: 1.4
+  align_timeout: 2.0
+  laser_flash_time: 0.3
+  verify_timeout: 0.6
+  qr_fresh_timeout: 0.6
+  land_finish_timeout: 25.0
 
-  # HOVER_BEFORE_SCAN：扫码前最短悬停 0.5s，最长等待 2.0s
-  scan_pre_hover_time: 0.5
-  scan_pre_hover_timeout: 2.0
+  # 受控降落参数：先回到 land 点上方，再用递减 z 航点下降，近地后才交给 AUTO.LAND 停桨。
+  # 原默认 0.06m/s 会非常慢；这里改为约 0.18m/s，并把下降级距放大到 0.25m。
+  controlled_land_step: 0.25
+  controlled_land_final_height: 0.05
+  controlled_land_contact_height: 0.12
+  controlled_land_max_vel_z: 0.18
+  controlled_land_max_acc_z: 0.20
+  controlled_land_pos_eps: 0.10
+  controlled_land_z_eps: 0.06
+  controlled_land_yaw_eps_deg: 8.0
+
+  # HOVER_BEFORE_SCAN：扫码前最短悬停 0.3s，最长等待 1.0s
+  scan_pre_hover_time: 0.3
+  scan_pre_hover_timeout: 1.0
 
   # 右上角黑色圆形降落区中心上方。
   # 这里保持 z=1.40，不使用 1.50，避免返回降落点前再多余上升。
@@ -70,46 +96,37 @@ task2_routes:
   # 所以这里的 routes_to_face 只负责把无人机带到对应面外侧安全通道附近。
   routes_to_face:
     A:
-      - {x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
+      # 直接进入 A 面下方安全通道；随后由程序追加动态 pre-scan safe 点。
       - {x: 0.25, y: -0.10, z: 1.40, yaw: 0.0}
 
     B:
-      - {x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
-      - {x: 0.25, y: -0.10, z: 1.40, yaw: 0.0}
+      # 先到 B 面下方安全通道，再由动态 pre-scan safe 点在安全通道内完成转向/降高。
       - {x: 1.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 1.25, y: -0.10, z: 1.40, yaw: 3.1416}
 
     C:
-      - {x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
-      - {x: 0.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 1.25, y: -0.10, z: 1.40, yaw: 0.0}
+      # 沿下方安全通道直接到 C 面入口，不再在 A/B 侧重复停点。
       - {x: 2.25, y: -0.10, z: 1.40, yaw: 0.0}
 
     D:
-      - {x: 0.00, y: 0.25, z: 1.50, yaw: 0.0}
-      - {x: 0.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 1.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 2.25, y: -0.10, z: 1.40, yaw: 0.0}
+      # 沿下方安全通道直接到 D 面入口，再由动态 pre-scan safe 点在安全通道内完成转向/降高。
       - {x: 3.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 3.25, y: -0.10, z: 1.40, yaw: 3.1416}
 
   # 扫完后退出目标面，再去降落区上方。
   # 返回路线统一不再使用 z=1.30 / z=1.50 作为中间高度。
   routes_from_face:
     A:
+      # 先退出到 A 面下方安全通道，再沿下方安全通道直达 D 面外侧，最后去降落点。
       - {x: 0.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 1.25, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 2.25, y: -0.10, z: 1.40, yaw: 0.0}
       - {x: 3.25, y: -0.10, z: 1.40, yaw: 0.0}
       - {x: 3.50, y: 2.50, z: 1.40, yaw: 0.0}
 
     B:
-      # 从 B 面返回时，先保持 B 面航向退出到下方安全通道，
+      # 从 B 面返回时，仍先保持 B 面航向退出到下方安全通道，
       # 再到 B/C 中间 x=1.75 处原地转向，避免贴着 B 面或 C 面旋转。
+      # 转正后直接沿下方安全通道到 D 面外侧，不再在 C 面入口重复停点。
       - {x: 1.25, y: -0.10, z: 1.40, yaw: 3.1416}
       - {x: 1.75, y: -0.10, z: 1.40, yaw: 3.1416}
       - {x: 1.75, y: -0.10, z: 1.40, yaw: 0.0}
-      - {x: 2.25, y: -0.10, z: 1.40, yaw: 0.0}
       - {x: 3.25, y: -0.10, z: 1.40, yaw: 0.0}
       - {x: 3.50, y: 2.50, z: 1.40, yaw: 0.0}
 
@@ -125,12 +142,12 @@ task2_routes:
   # yaw=0.0 面向 +X；yaw=3.1416 面向 -X。
   # scan 点与货架中心线距离约 0.50m。
   scan_points:
-    A1: {x: 0.25, y: 0.75, z: 1.40, yaw: 0.0}
+    A1: {x: 0.25, y: 1.75, z: 1.40, yaw: 0.0}
     A2: {x: 0.25, y: 1.25, z: 1.40, yaw: 0.0}
-    A3: {x: 0.25, y: 1.75, z: 1.40, yaw: 0.0}
-    A4: {x: 0.25, y: 0.75, z: 1.00, yaw: 0.0}
+    A3: {x: 0.25, y: 0.75, z: 1.40, yaw: 0.0}
+    A4: {x: 0.25, y: 1.75, z: 1.00, yaw: 0.0}
     A5: {x: 0.25, y: 1.25, z: 1.00, yaw: 0.0}
-    A6: {x: 0.25, y: 1.75, z: 1.00, yaw: 0.0}
+    A6: {x: 0.25, y: 0.75, z: 1.00, yaw: 0.0}
 
     B1: {x: 1.25, y: 0.75, z: 1.40, yaw: 3.1416}
     B2: {x: 1.25, y: 1.25, z: 1.40, yaw: 3.1416}
@@ -139,12 +156,12 @@ task2_routes:
     B5: {x: 1.25, y: 1.25, z: 1.00, yaw: 3.1416}
     B6: {x: 1.25, y: 1.75, z: 1.00, yaw: 3.1416}
 
-    C1: {x: 2.25, y: 0.75, z: 1.40, yaw: 0.0}
+    C1: {x: 2.25, y: 1.75, z: 1.40, yaw: 0.0}
     C2: {x: 2.25, y: 1.25, z: 1.40, yaw: 0.0}
-    C3: {x: 2.25, y: 1.75, z: 1.40, yaw: 0.0}
-    C4: {x: 2.25, y: 0.75, z: 1.00, yaw: 0.0}
+    C3: {x: 2.25, y: 0.75, z: 1.40, yaw: 0.0}
+    C4: {x: 2.25, y: 1.75, z: 1.00, yaw: 0.0}
     C5: {x: 2.25, y: 1.25, z: 1.00, yaw: 0.0}
-    C6: {x: 2.25, y: 1.75, z: 1.00, yaw: 0.0}
+    C6: {x: 2.25, y: 0.75, z: 1.00, yaw: 0.0}
 
     D1: {x: 3.25, y: 0.75, z: 1.40, yaw: 3.1416}
     D2: {x: 3.25, y: 1.25, z: 1.40, yaw: 3.1416}
